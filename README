@@ -6,6 +6,7 @@ dwm is an extremely fast, small, and dynamic window manager for X.
 Requirements
 ------------
 In order to build dwm you need the Xlib header files.
+In order to run this config stock you will need kitty and rofi, though this can be changed.
 
 
 Installation
