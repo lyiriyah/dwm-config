@@ -53,7 +53,8 @@
 #define INTERSECT(x, y, w, h, m)                                               \
   (MAX(0, MIN((x) + (w), (m)->wx + (m)->ww) - MAX((x), (m)->wx)) *             \
    MAX(0, MIN((y) + (h), (m)->wy + (m)->wh) - MAX((y), (m)->wy)))
-#define ISVISIBLE(C) ((C->tags & C->mon->tagset[C->mon->seltags]))
+#define ISVISIBLEONTAG(C, T) ((C->tags & T))
+#define ISVISIBLE(C) ISVISIBLEONTAG(C, C->mon->tagset[C->mon->seltags])
 #define LENGTH(X) (sizeof X / sizeof X[0])
 #define MOUSEMASK (BUTTONMASK | PointerMotionMask)
 #define WIDTH(X) ((X)->w + 2 * (X)->bw + gappx)
@@ -174,6 +175,7 @@ static int applysizehints(Client *c, int *x, int *y, int *w, int *h,
 static void arrange(Monitor *m);
 static void arrangemon(Monitor *m);
 static void attach(Client *c);
+static void attachaside(Client *c);
 static void attachstack(Client *c);
 static void buttonpress(XEvent *e);
 static void checkotherwm(void);
@@ -195,7 +197,7 @@ static void enternotify(XEvent *e);
 static void expose(XEvent *e);
 static void focus(Client *c);
 static void focusin(XEvent *e);
-// static void focusmon(const Arg *arg);
+static void focusmon(const Arg *arg);
 static void focusstack(const Arg *arg);
 static Atom getatomprop(Client *c, Atom prop);
 static int getrootptr(int *x, int *y);
@@ -212,6 +214,7 @@ static void maprequest(XEvent *e);
 static void monocle(Monitor *m);
 static void motionnotify(XEvent *e);
 static void movemouse(const Arg *arg);
+static Client *nexttagged(Client *c);
 static Client *nexttiled(Client *c);
 static void pop(Client *);
 static void propertynotify(XEvent *e);
@@ -240,6 +243,8 @@ static void tagmon(const Arg *arg);
 static void tile(Monitor *);
 static void togglebar(const Arg *arg);
 static void togglefloating(const Arg *arg);
+static void togglefullscr(const Arg *arg);
+static void togglescratch(const Arg *arg);
 static void toggletag(const Arg *arg);
 static void toggleview(const Arg *arg);
 static void unfocus(Client *c, int setfocus);
@@ -264,6 +269,8 @@ static int xerrorstart(Display *dpy, XErrorEvent *ee);
 static void zoom(const Arg *arg);
 static void centeredmaster(Monitor *m);
 static void centeredfloatingmaster(Monitor *m);
+static void bstack(Monitor *m);
+static void bstackhoriz(Monitor *m);
 
 /* variables */
 static const char broken[] = "broken";
@@ -300,6 +307,7 @@ static Window root, wmcheckwin;
 
 /* configuration, allows nested code to access above variables */
 #include "config.h"
+static unsigned int scratchtag = 1 << LENGTH(tags);
 
 /* compile-time check if all tags fit into an unsigned int bit array. */
 struct NumTags {
@@ -431,13 +439,23 @@ void attach(Client *c) {
   c->mon->clients = c;
 }
 
+void attachaside(Client *c) {
+  Client *at = nexttagged(c);
+  if (!at) {
+    attach(c);
+    return;
+  }
+  c->next = at->next;
+  at->next = c;
+}
+
 void attachstack(Client *c) {
   c->snext = c->mon->stack;
   c->mon->stack = c;
 }
 
 void buttonpress(XEvent *e) {
-  unsigned int i, x, click;
+  unsigned int i, x, click, occ = 0;
   Arg arg = {0};
   Client *c;
   Monitor *m;
@@ -452,9 +470,13 @@ void buttonpress(XEvent *e) {
   }
   if (ev->window == selmon->barwin) {
     i = x = 0;
-    do
-      x += TEXTW(tags[i]);
-    while (ev->x >= x && ++i < LENGTH(tags));
+    for (c = m->clients; c; c = c->next)
+      occ |= c->tags == 255 ? 0 : c->tags;
+    do {
+      if (!(occ & 1 << i || m->tagset[m->seltags] & 1 << i))
+        continue;
+      x = TEXTW(tags[i]);
+    } while (ev->x >= x && ++i < LENGTH(tags));
     if (i < LENGTH(tags)) {
       click = ClkTagBar;
       arg.ui = 1 << i;
@@ -732,12 +754,16 @@ void drawbar(Monitor *m) {
   }
 
   for (c = m->clients; c; c = c->next) {
-    occ |= c->tags;
+    occ |= c->tags == 255 ? 0 : c->tags;
     if (c->isurgent)
       urg |= c->tags;
   }
   x = 0;
   for (i = 0; i < LENGTH(tags); i++) {
+    /* do not draw vacant tags */
+    if (!(occ & 1 << i || m->tagset[m->seltags] & 1 << i))
+      continue;
+
     w = TEXTW(tags[i]);
     drw_setscheme(
         drw, scheme[m->tagset[m->seltags] & 1 << i ? SchemeSel : SchemeNorm]);
@@ -834,21 +860,17 @@ void focusin(XEvent *e) {
     setfocus(selmon->sel);
 }
 
-/*
-void
-focusmon(const Arg *arg)
-{
-        Monitor *m;
+void focusmon(const Arg *arg) {
+  Monitor *m;
 
-        if (!mons->next)
-                return;
-        if ((m = dirtomon(arg->i)) == selmon)
-                return;
-        unfocus(selmon->sel, 0);
-        selmon = m;
-        focus(NULL);
+  if (!mons->next)
+    return;
+  if ((m = dirtomon(arg->i)) == selmon)
+    return;
+  unfocus(selmon->sel, 0);
+  selmon = m;
+  focus(NULL);
 }
-*/
 
 void focusstack(const Arg *arg) {
   Client *c = NULL, *i;
@@ -1054,6 +1076,13 @@ void manage(Window w, XWindowAttributes *wa) {
                  ? bh
                  : c->mon->my);
   c->bw = borderpx;
+  selmon->tagset[selmon->seltags] &= ~scratchtag;
+  if (!strcmp(c->name, scratchpadname)) {
+    c->mon->tagset[c->mon->seltags] |= c->tags = scratchtag;
+    c->isfloating = True;
+    c->x = c->mon->wx + (c->mon->ww / 2 - WIDTH(c) / 2);
+    c->y = c->mon->wy + (c->mon->wh / 2 - HEIGHT(c) / 2);
+  }
 
   wc.border_width = c->bw;
   XConfigureWindow(dpy, w, CWBorderWidth, &wc);
@@ -1070,7 +1099,7 @@ void manage(Window w, XWindowAttributes *wa) {
     c->isfloating = c->oldstate = trans != None || c->isfixed;
   if (c->isfloating)
     XRaiseWindow(dpy, c->win);
-  attach(c);
+  attachaside(c);
   attachstack(c);
   XChangeProperty(dpy, root, netatom[NetClientList], XA_WINDOW, 32,
                   PropModeAppend, (unsigned char *)&(c->win), 1);
@@ -1191,6 +1220,13 @@ void movemouse(const Arg *arg) {
   }
 }
 
+Client *nexttagged(Client *c) {
+  Client *walked = c->mon->clients;
+  for (; walked && (walked->isfloating || !ISVISIBLEONTAG(walked, c->tags));
+       walked = walked->next)
+    ;
+  return walked;
+}
 Client *nexttiled(Client *c) {
   for (; c && (c->isfloating || !ISVISIBLE(c)); c = c->next)
     ;
@@ -1428,7 +1464,7 @@ void sendmon(Client *c, Monitor *m) {
   detachstack(c);
   c->mon = m;
   c->tags = m->tagset[m->seltags]; /* assign tags of target monitor */
-  attach(c);
+  attachaside(c);
   attachstack(c);
   focus(NULL);
   arrange(NULL);
@@ -1708,6 +1744,32 @@ void togglefloating(const Arg *arg) {
   arrange(selmon);
 }
 
+void togglefullscr(const Arg *arg) {
+  if (selmon->sel)
+    setfullscreen(selmon->sel, !selmon->sel->isfullscreen);
+}
+
+void togglescratch(const Arg *arg) {
+  Client *c;
+  unsigned int found = 0;
+
+  for (c = selmon->clients; c && !(found = c->tags & scratchtag); c = c->next)
+    ;
+  if (found) {
+    unsigned int newtagset = selmon->tagset[selmon->seltags] ^ scratchtag;
+    if (newtagset) {
+      selmon->tagset[selmon->seltags] = newtagset;
+      focus(NULL);
+      arrange(selmon);
+    }
+    if (ISVISIBLE(c)) {
+      focus(c);
+      restack(selmon);
+    }
+  } else
+    spawn(arg);
+}
+
 void toggletag(const Arg *arg) {
   unsigned int newtags;
 
@@ -1868,7 +1930,7 @@ int updategeom(void) {
           m->clients = c->next;
           detachstack(c);
           c->mon = mons;
-          attach(c);
+          attachaside(c);
           attachstack(c);
         }
         if (m == selmon)
@@ -2185,4 +2247,68 @@ void centeredfloatingmaster(Monitor *m) {
       resize(c, m->wx + tx, m->wy, w - (2 * c->bw), m->wh - (2 * c->bw), 0);
       tx += WIDTH(c);
     }
+}
+
+static void bstack(Monitor *m) {
+  int w, h, mh, mx, tx, ty, tw;
+  unsigned int i, n;
+  Client *c;
+
+  for (n = 0, c = nexttiled(m->clients); c; c = nexttiled(c->next), n++)
+    ;
+  if (n == 0)
+    return;
+  if (n > m->nmaster) {
+    mh = m->nmaster ? m->mfact * m->wh : 0;
+    tw = m->ww / (n - m->nmaster);
+    ty = m->wy + mh;
+  } else {
+    mh = m->wh;
+    tw = m->ww;
+    ty = m->wy;
+  }
+  for (i = mx = 0, tx = m->wx, c = nexttiled(m->clients); c;
+       c = nexttiled(c->next), i++) {
+    if (i < m->nmaster) {
+      w = (m->ww - mx) / (MIN(n, m->nmaster) - i);
+      resize(c, m->wx + mx, m->wy, w - (2 * c->bw), mh - (2 * c->bw), 0);
+      mx += WIDTH(c);
+    } else {
+      h = m->wh - mh;
+      resize(c, tx, ty, tw - (2 * c->bw), h - (2 * c->bw), 0);
+      if (tw != m->ww)
+        tx += WIDTH(c);
+    }
+  }
+}
+
+static void bstackhoriz(Monitor *m) {
+  int w, mh, mx, tx, ty, th;
+  unsigned int i, n;
+  Client *c;
+
+  for (n = 0, c = nexttiled(m->clients); c; c = nexttiled(c->next), n++)
+    ;
+  if (n == 0)
+    return;
+  if (n > m->nmaster) {
+    mh = m->nmaster ? m->mfact * m->wh : 0;
+    th = (m->wh - mh) / (n - m->nmaster);
+    ty = m->wy + mh;
+  } else {
+    th = mh = m->wh;
+    ty = m->wy;
+  }
+  for (i = mx = 0, tx = m->wx, c = nexttiled(m->clients); c;
+       c = nexttiled(c->next), i++) {
+    if (i < m->nmaster) {
+      w = (m->ww - mx) / (MIN(n, m->nmaster) - i);
+      resize(c, m->wx + mx, m->wy, w - (2 * c->bw), mh - (2 * c->bw), 0);
+      mx += WIDTH(c);
+    } else {
+      resize(c, tx, ty, m->ww - (2 * c->bw), th - (2 * c->bw), 0);
+      if (th != m->wh)
+        ty += HEIGHT(c);
+    }
+  }
 }
