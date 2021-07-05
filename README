@@ -6,7 +6,7 @@ dwm is an extremely fast, small, and dynamic window manager for X.
 Requirements
 ------------
 In order to build dwm you need the Xlib header files.
-
+You also require rofi and kitty unless you edit the config.
 
 Installation
 ------------
@@ -41,8 +41,16 @@ like this in your .xinitrc:
     done &
     exec dwm
 
+I put this in my xinitrc to have restarting without a patch:
+    while type dwm>/dev/null; do
+        dwm && continue || break
+    done
+
+This means that if someone runs pkill dwm, dwm exits with 1 and you are bumped to tty, but with quit(0), dwm returns 0 and it is relaunched.
 
 Configuration
 -------------
 The configuration of dwm is done by creating a custom config.h
 and (re)compiling the source code.
+
+In this repo, config.h is symlinked to config.def.h, so edit that instead
