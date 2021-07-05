@@ -1,13 +1,2 @@
-&
-!/*/
-!/dwm.c
-!/drw.c
-!/config*.h
-!/Makefile
-!/config.mk
-!/util.c
-!/transient.c
-!/util.h
-!/drw.h
-!/README
-!/LICENSE
+*.o
+*.png
