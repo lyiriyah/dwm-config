@@ -17,7 +17,6 @@
 #include "pertag.c"
 #include "reorganizetags.c"
 #include "restartsig.c"
-#include "rotatestack.c"
 #include "scratchpad.c"
 #include "swallow.c"
 #include "togglefullscreen.c"
